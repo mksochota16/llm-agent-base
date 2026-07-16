@@ -1,4 +1,4 @@
-from agent_base import AgentBase
+from .agent_base import AgentBase
 
 
 class AgentPipelineBase:

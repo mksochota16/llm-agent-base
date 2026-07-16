@@ -1,8 +1,8 @@
 from typing import Callable, Optional
 
-from knowledge_base import DocumentChunk, KnowledgeBase
-from llm_connection_config import LLMConnectionConfig
-from tool_calling import build_tool_schema, execute_tool_loop
+from .knowledge_base import DocumentChunk, KnowledgeBase
+from .llm_connection_config import LLMConnectionConfig
+from .tool_calling import build_tool_schema, execute_tool_loop
 
 
 class AgentBase:

@@ -7,7 +7,7 @@ from typing import Optional
 import numpy as np
 import faiss
 
-from llm_connection_config import LLMConnectionConfig
+from .llm_connection_config import LLMConnectionConfig
 
 
 @dataclass

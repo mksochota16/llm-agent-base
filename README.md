@@ -1,6 +1,12 @@
 # llm-agent-base
 
-A lightweight Python base for building LLM agents with tool calling and retrieval-augmented generation (RAG). It works with any OpenAI-compatible API (OpenRouter, OpenAI, local models via Ollama, etc.).
+A lightweight Python library for building LLM agents with tool calling and retrieval-augmented generation (RAG). Works with any OpenAI-compatible API (OpenRouter, OpenAI, Ollama, etc.).
+
+## Installation
+
+```bash
+pip install llm-agent-base
+```
 
 ## Features
 
@@ -9,44 +15,10 @@ A lightweight Python base for building LLM agents with tool calling and retrieva
 - **Pipelines** — chain multiple agents so each agent's output becomes the next agent's input
 - **Debug mode** — optional logging of tool calls and knowledge retrievals
 
-## Project structure
-
-```
-agent_base.py           # AgentBase class
-agent_pipeline_base.py  # AgentPipelineBase class
-tool_calling.py         # Schema building and tool-call execution loop
-knowledge_base.py       # Document ingestion, embedding, and FAISS retrieval
-llm_connection_config.py# LLM client configuration
-knowledge/              # Knowledge files (subdirectory per topic)
-```
-
-## Setup
-
-**1. Install dependencies**
-
-```bash
-pip install -r requirements.txt
-```
-
-**2. Configure environment**
-
-Copy `.env` and fill in your credentials:
-
-```env
-OPENROUTER_API_KEY=your-api-key-here
-MODEL=openai/gpt-4o-mini
-BASE_URL=https://openrouter.ai/api/v1
-```
-
-The default `BASE_URL` points to [OpenRouter](https://openrouter.ai), which gives access to many models through a single API key. You can swap it for the OpenAI base URL or any other compatible endpoint.
-
-## Usage
-
-### Basic agent
+## Quick start
 
 ```python
-from agent_base import AgentBase
-from llm_connection_config import LLMConnectionConfig
+from llm_agent_base import AgentBase, LLMConnectionConfig
 
 config = LLMConnectionConfig(model="openai/gpt-4o-mini", api_key="...")
 
@@ -58,11 +30,19 @@ agent = AgentBase(
 print(agent.run("What is the capital of France?"))
 ```
 
+The default `base_url` points to [OpenRouter](https://openrouter.ai), which gives access to many models through a single API key. You can swap it for the OpenAI base URL or any other compatible endpoint.
+
+## Usage
+
 ### Tool calling
 
 Register any Python function as a tool. The function name becomes the tool name, the docstring becomes its description, and the type hints define the parameter schema.
 
 ```python
+from llm_agent_base import AgentBase, LLMConnectionConfig
+
+config = LLMConnectionConfig(model="openai/gpt-4o-mini", api_key="...")
+
 def get_weather(city: str) -> str:
     """Return the current weather for a given city."""
     return f"The weather in {city} is sunny and 22°C."
@@ -96,8 +76,6 @@ Place your documents in a folder (organised into subdirectories by topic). Call 
 
 ```
 knowledge/
-├── topic/
-│   └── overview.txt
 ├── products/
 │   ├── faq.md
 │   └── pricing.json
@@ -106,6 +84,10 @@ knowledge/
 ```
 
 ```python
+from llm_agent_base import AgentBase, LLMConnectionConfig
+
+config = LLMConnectionConfig(model="openai/gpt-4o-mini", api_key="...")
+
 agent = AgentBase(
     system_prompt="You are a product assistant. Answer using only the provided context.",
     llm_config=config,
@@ -128,7 +110,9 @@ print(agent.run("Who founded the company and when?"))
 Chain agents so the output of one becomes the input of the next:
 
 ```python
-from agent_pipeline_base import AgentPipelineBase
+from llm_agent_base import AgentBase, AgentPipelineBase, LLMConnectionConfig
+
+config = LLMConnectionConfig(model="openai/gpt-4o-mini", api_key="...")
 
 researcher = AgentBase(
     system_prompt="Extract the key facts from the user's question.",
@@ -155,3 +139,15 @@ agent = AgentBase(..., debug=True)
 [debug] Retrieving knowledge
 [debug] tool 'get_weather' args={'city': 'Tokyo'} result=The weather in Tokyo is sunny and 22°C.
 ```
+
+## API reference
+
+| Class / function | Description |
+|---|---|
+| `LLMConnectionConfig` | Dataclass holding model name, base URL, API key, and embedding model |
+| `AgentBase` | Single agent with optional tool calling and RAG |
+| `AgentPipelineBase` | Chains multiple `AgentBase` instances in sequence |
+| `KnowledgeBase` | Document ingestion, embedding, and FAISS retrieval |
+| `DocumentChunk` | Dataclass representing a retrieved text chunk |
+| `build_tool_schema` | Builds an OpenAI-compatible tool schema from a function |
+| `execute_tool_loop` | Runs the agentic tool-calling loop against any OpenAI-compatible client |
