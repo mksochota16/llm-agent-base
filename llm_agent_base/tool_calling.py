@@ -60,6 +60,8 @@ def execute_tool_loop(
     messages: list,
     tools: dict[str, tuple[Callable, dict]],
     debug: bool = False,
+    temperature: float | None = None,
+    response_format: dict | None = None,
 ) -> str:
     """Run the agentic tool-calling loop and return the final text response."""
     tool_schemas = [schema for _, schema in tools.values()]
@@ -68,6 +70,10 @@ def execute_tool_loop(
         kwargs = {"model": model, "messages": messages}
         if tool_schemas:
             kwargs["tools"] = tool_schemas
+        if temperature is not None:
+            kwargs["temperature"] = temperature
+        if response_format is not None:
+            kwargs["response_format"] = response_format
 
         response = client.chat.completions.create(**kwargs)
         choice = response.choices[0]

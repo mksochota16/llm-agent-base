@@ -13,11 +13,15 @@ class AgentBase:
         knowledge_folder_path: Optional[str] = None,
         knowledge_index_dir: str = ".kb_index",
         knowledge_top_k: int = 5,
+        temperature: Optional[float] = None,
+        response_format: Optional[dict] = None,
         debug: bool = False,
     ):
         self.system_prompt = system_prompt
         self.llm_config = llm_config
         self.knowledge_top_k = knowledge_top_k
+        self.temperature = temperature
+        self.response_format = response_format
         self.debug = debug
         self._client = llm_config.build_client()
         self._kb: Optional[KnowledgeBase] = None
@@ -54,6 +58,21 @@ class AgentBase:
             print("[debug] Retrieving knowledge")
         return self._kb.retrieve(query, top_k=self.knowledge_top_k)
 
+    def ask(self, prompt: str) -> str:
+        """Single LLM call with no knowledge retrieval or tool calling."""
+        kwargs: dict = {
+            "model": self.llm_config.model,
+            "messages": [
+                {"role": "system", "content": self.system_prompt},
+                {"role": "user", "content": prompt},
+            ],
+        }
+        if self.temperature is not None:
+            kwargs["temperature"] = self.temperature
+        if self.response_format is not None:
+            kwargs["response_format"] = self.response_format
+        return self._client.chat.completions.create(**kwargs).choices[0].message.content
+
     def run(self, prompt: str) -> str:
         chunks = self.retrieve_knowledge(prompt)
 
@@ -67,4 +86,12 @@ class AgentBase:
             {"role": "user", "content": prompt},
         ]
 
-        return execute_tool_loop(self._client, self.llm_config.model, messages, self._tools, debug=self.debug)
+        return execute_tool_loop(
+            self._client,
+            self.llm_config.model,
+            messages,
+            self._tools,
+            debug=self.debug,
+            temperature=self.temperature,
+            response_format=self.response_format,
+        )
