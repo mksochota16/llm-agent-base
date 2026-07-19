@@ -1,8 +1,45 @@
-from typing import Callable, Optional
+import base64
+import mimetypes
+from pathlib import Path
+from typing import Callable, Optional, Union
 
 from .knowledge_base import DocumentChunk, KnowledgeBase
 from .llm_connection_config import LLMConnectionConfig
 from .tool_calling import build_tool_schema, execute_tool_loop
+
+_IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".gif", ".webp"}
+_TEXT_EXTENSIONS = {".txt", ".md", ".json", ".csv", ".xml", ".html", ".yaml", ".yml", ".py", ".js", ".ts"}
+_SUPPORTED_EXTENSIONS = _IMAGE_EXTENSIONS | _TEXT_EXTENSIONS | {".pdf"}
+
+
+def _read_file_as_text(path: Path) -> str:
+    if path.suffix.lower() == ".pdf":
+        from pypdf import PdfReader
+        reader = PdfReader(str(path))
+        return "\n".join(page.extract_text() or "" for page in reader.pages)
+    return path.read_text(encoding="utf-8", errors="ignore")
+
+
+def _build_user_content(prompt: str, files: Optional[list[str]]) -> Union[str, list]:
+    if not files:
+        return prompt
+    parts: list = [{"type": "text", "text": prompt}]
+    for file_path in files:
+        path = Path(file_path)
+        ext = path.suffix.lower()
+        if ext not in _SUPPORTED_EXTENSIONS:
+            raise ValueError(f"Unsupported file type '{ext}' for '{path.name}'. Supported: {sorted(_SUPPORTED_EXTENSIONS)}")
+        if ext in _IMAGE_EXTENSIONS:
+            mime = mimetypes.guess_type(str(path))[0] or "image/png"
+            data = base64.b64encode(path.read_bytes()).decode()
+            parts.append({
+                "type": "image_url",
+                "image_url": {"url": f"data:{mime};base64,{data}"},
+            })
+        else:
+            text = _read_file_as_text(path)
+            parts.append({"type": "text", "text": f"[{path.name}]\n{text}"})
+    return parts
 
 
 class AgentBase:
@@ -72,7 +109,7 @@ class AgentBase:
             print("[debug] Retrieving knowledge")
         return self._kb.retrieve(query, top_k=self.knowledge_top_k)
 
-    def chat(self, message: str) -> str:
+    def chat(self, message: str, files: Optional[list[str]] = None) -> str:
         """Send a message and get a response, maintaining conversation history across calls."""
         chunks = self.retrieve_knowledge(message)
         system = self.system_prompt
@@ -83,7 +120,7 @@ class AgentBase:
         messages = (
             [{"role": "system", "content": system}]
             + list(self._conversation_messages)
-            + [{"role": "user", "content": message}]
+            + [{"role": "user", "content": _build_user_content(message, files)}]
         )
 
         response = execute_tool_loop(
@@ -96,7 +133,7 @@ class AgentBase:
             response_format=self.response_format,
         )
 
-        self._conversation_messages.append({"role": "user", "content": message})
+        self._conversation_messages.append({"role": "user", "content": _build_user_content(message, files)})
         self._conversation_messages.append({"role": "assistant", "content": response})
         return response
 
@@ -104,7 +141,7 @@ class AgentBase:
         """Clear the stored conversation history."""
         self._conversation_messages = []
 
-    def ask(self, prompt: str) -> str:
+    def ask(self, prompt: str, files: Optional[list[str]] = None) -> str:
         """Single LLM call with optional knowledge retrieval but no tool calling."""
         chunks = self.retrieve_knowledge(prompt)
         system = self.system_prompt
@@ -116,7 +153,7 @@ class AgentBase:
             "model": self.llm_config.model,
             "messages": [
                 {"role": "system", "content": system},
-                {"role": "user", "content": prompt},
+                {"role": "user", "content": _build_user_content(prompt, files)},
             ],
         }
         if self.temperature is not None:
@@ -125,7 +162,7 @@ class AgentBase:
             kwargs["response_format"] = self.response_format
         return self._client.chat.completions.create(**kwargs).choices[0].message.content
 
-    def run(self, prompt: str) -> str:
+    def run(self, prompt: str, files: Optional[list[str]] = None) -> str:
         chunks = self.retrieve_knowledge(prompt)
 
         system = self.system_prompt
@@ -135,7 +172,7 @@ class AgentBase:
 
         messages = [
             {"role": "system", "content": system},
-            {"role": "user", "content": prompt},
+            {"role": "user", "content": _build_user_content(prompt, files)},
         ]
 
         return execute_tool_loop(

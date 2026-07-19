@@ -15,6 +15,7 @@ pip install llm-agent-base
 - **Simple LLM calls** — single-call `ask()` with optional knowledge retrieval for straightforward completions
 - **Agentic loop** — `run()` with knowledge retrieval and tool calling until a final text response
 - **Conversational chat** — `chat()` maintains conversation history across calls; `reset_conversation()` starts fresh
+- **File attachments** — pass images, PDFs, and text files directly to `ask()`, `run()`, or `chat()` via the `files` parameter
 - **Tool calling** — register plain Python functions as LLM-callable tools; schemas are built automatically from type hints and docstrings
 - **RAG** — ingest a folder of documents (`.txt`, `.md`, `.json`, `.pdf`) into a FAISS vector index and inject relevant chunks into every prompt
 - **Knowledge search tool** — when a knowledge base is configured, the agent automatically gains a `search_knowledge` tool it can call mid-reasoning for targeted lookups
@@ -177,6 +178,30 @@ agent.ingest_knowledge(save=True)
 print(agent.run("Who founded the company and when?"))
 ```
 
+### File attachments
+
+All three call methods accept an optional `files` parameter — a list of file paths to attach to the prompt. Files are embedded directly in the message sent to the model.
+
+| Type | Extensions |
+|---|---|
+| Images | `.png`, `.jpg`, `.jpeg`, `.gif`, `.webp` |
+| Documents | `.pdf` |
+| Text | `.txt`, `.md`, `.json`, `.csv`, `.xml`, `.html`, `.yaml`, `.yml`, `.py`, `.js`, `.ts` |
+
+Passing a file with any other extension raises a `ValueError`.
+
+```python
+# Describe an image (requires a vision-capable model)
+print(agent.ask("What's in this diagram?", files=["architecture.png"]))
+
+# Summarise a PDF
+print(agent.run("Summarise the key findings.", files=["report.pdf"]))
+
+# Multi-turn with an attached file — the file stays in conversation history
+agent.chat("Here's our codebase overview.", files=["overview.md"])
+agent.chat("Which module handles authentication?")
+```
+
 ### Agent pipelines
 
 Chain agents so the output of one becomes the input of the next:
@@ -238,9 +263,9 @@ agent = AgentBase(..., debug=True)
 
 | Method | Description |
 |---|---|
-| `ask(prompt)` | Single LLM call with optional knowledge retrieval; no tool calling |
-| `run(prompt)` | Full agentic loop — knowledge retrieval + tool calling until text response |
-| `chat(message)` | Like `run()` but accumulates conversation history across calls |
+| `ask(prompt, files)` | Single LLM call with optional knowledge retrieval; no tool calling |
+| `run(prompt, files)` | Full agentic loop — knowledge retrieval + tool calling until text response |
+| `chat(message, files)` | Like `run()` but accumulates conversation history across calls |
 | `reset_conversation()` | Clear the stored conversation history |
 | `register_tool(fn)` | Register a function as a tool; usable as a decorator |
 | `ingest_knowledge(save)` | Parse, embed, and index documents in `knowledge_folder_path` |
