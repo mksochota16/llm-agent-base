@@ -26,6 +26,7 @@ class AgentBase:
         self._client = llm_config.build_client()
         self._kb: Optional[KnowledgeBase] = None
         self._tools: dict[str, tuple[Callable, dict]] = {}
+        self._conversation_messages: list[dict] = []
 
         if knowledge_folder_path:
             self._kb = KnowledgeBase(
@@ -33,11 +34,24 @@ class AgentBase:
                 llm_config=llm_config,
                 index_dir=knowledge_index_dir,
             )
+            self._register_knowledge_tool()
 
     def register_tool(self, fn: Callable) -> Callable:
         """Register a Python function as a callable tool. Can be used as a decorator."""
         self._tools[fn.__name__] = (fn, build_tool_schema(fn))
         return fn
+
+    def _register_knowledge_tool(self) -> None:
+        def search_knowledge(query: str) -> str:
+            """Search the knowledge base for information relevant to the query. Use this when you need to look up facts, context, or details that may be stored in the available knowledge."""
+            chunks = self._kb.retrieve(query, top_k=self.knowledge_top_k)
+            if not chunks:
+                return "No relevant information found in the knowledge base."
+            if self.debug:
+                print(f"[debug] search_knowledge query={query!r} returned {len(chunks)} chunk(s)")
+            return "\n\n".join(f"[{c.source}]\n{c.text}" for c in chunks)
+
+        self._tools["search_knowledge"] = (search_knowledge, build_tool_schema(search_knowledge))
 
     def ingest_knowledge(self, save: bool = True) -> int:
         if self._kb is None:
@@ -58,12 +72,50 @@ class AgentBase:
             print("[debug] Retrieving knowledge")
         return self._kb.retrieve(query, top_k=self.knowledge_top_k)
 
+    def chat(self, message: str) -> str:
+        """Send a message and get a response, maintaining conversation history across calls."""
+        chunks = self.retrieve_knowledge(message)
+        system = self.system_prompt
+        if chunks:
+            context = "\n\n".join(f"[{c.source}]\n{c.text}" for c in chunks)
+            system = f"{system}\n\n<context>\n{context}\n</context>"
+
+        messages = (
+            [{"role": "system", "content": system}]
+            + list(self._conversation_messages)
+            + [{"role": "user", "content": message}]
+        )
+
+        response = execute_tool_loop(
+            self._client,
+            self.llm_config.model,
+            messages,
+            self._tools,
+            debug=self.debug,
+            temperature=self.temperature,
+            response_format=self.response_format,
+        )
+
+        self._conversation_messages.append({"role": "user", "content": message})
+        self._conversation_messages.append({"role": "assistant", "content": response})
+        return response
+
+    def reset_conversation(self) -> None:
+        """Clear the stored conversation history."""
+        self._conversation_messages = []
+
     def ask(self, prompt: str) -> str:
-        """Single LLM call with no knowledge retrieval or tool calling."""
+        """Single LLM call with optional knowledge retrieval but no tool calling."""
+        chunks = self.retrieve_knowledge(prompt)
+        system = self.system_prompt
+        if chunks:
+            context = "\n\n".join(f"[{c.source}]\n{c.text}" for c in chunks)
+            system = f"{system}\n\n<context>\n{context}\n</context>"
+
         kwargs: dict = {
             "model": self.llm_config.model,
             "messages": [
-                {"role": "system", "content": self.system_prompt},
+                {"role": "system", "content": system},
                 {"role": "user", "content": prompt},
             ],
         }

@@ -12,9 +12,12 @@ pip install llm-agent-base
 
 ## Features
 
-- **Simple LLM calls** — single-call `ask()` with no overhead for straightforward completions
+- **Simple LLM calls** — single-call `ask()` with optional knowledge retrieval for straightforward completions
+- **Agentic loop** — `run()` with knowledge retrieval and tool calling until a final text response
+- **Conversational chat** — `chat()` maintains conversation history across calls; `reset_conversation()` starts fresh
 - **Tool calling** — register plain Python functions as LLM-callable tools; schemas are built automatically from type hints and docstrings
 - **RAG** — ingest a folder of documents (`.txt`, `.md`, `.json`, `.pdf`) into a FAISS vector index and inject relevant chunks into every prompt
+- **Knowledge search tool** — when a knowledge base is configured, the agent automatically gains a `search_knowledge` tool it can call mid-reasoning for targeted lookups
 - **Pipelines** — chain multiple agents so each agent's output becomes the next agent's input
 - **Temperature control** — set per-agent temperature for precise or creative responses
 - **Response format** — enforce JSON output or structured schemas via the OpenAI response format API
@@ -45,7 +48,7 @@ The default `base_url` points to [OpenRouter](https://openrouter.ai), which give
 
 ### Simple LLM call
 
-`ask()` makes a single completion call with no knowledge retrieval or tool calling — the fastest path when you just need a plain response.
+`ask()` makes a single completion call with no tool calling. If a knowledge base is configured, relevant chunks are automatically retrieved and injected as context.
 
 ```python
 from llm_agent_base import AgentBase, LLMConnectionConfig
@@ -115,9 +118,33 @@ print(agent.run("What is the weather in Tokyo and what is 10 + 20?"))
 agent.register_tool(get_weather)
 ```
 
+### Conversational chat
+
+`chat()` works like `run()` — knowledge retrieval and tool calling are both active — but it accumulates the conversation history across calls so the LLM retains context between turns. Call `reset_conversation()` to wipe the history and start a new session.
+
+```python
+from llm_agent_base import AgentBase, LLMConnectionConfig
+
+config = LLMConnectionConfig(model="openai/gpt-4o-mini", api_key="...")
+
+agent = AgentBase(
+    system_prompt="You are a helpful assistant. Keep answers concise.",
+    llm_config=config,
+)
+
+print(agent.chat("My name is Alice."))
+print(agent.chat("What is my name?"))  # agent remembers: Alice
+
+agent.reset_conversation()
+
+print(agent.chat("What is my name?"))  # history cleared, agent no longer knows
+```
+
 ### RAG (knowledge base)
 
-Place your documents in a folder (organised into subdirectories by topic). Call `ingest_knowledge` once to embed and index them, then `run` as normal — relevant chunks are automatically injected into the system prompt.
+Place your documents in a folder (organised into subdirectories by topic). Call `ingest_knowledge` once to embed and index them, then use `run`, `ask`, or `chat` — relevant chunks are automatically retrieved and injected into the system prompt on every call.
+
+When a knowledge base is configured, the agent also registers a `search_knowledge` tool automatically. This lets the LLM perform targeted knowledge lookups mid-reasoning, in addition to the upfront retrieval that seeds each prompt.
 
 ```
 knowledge/
@@ -211,11 +238,14 @@ agent = AgentBase(..., debug=True)
 
 | Method | Description |
 |---|---|
-| `ask(prompt)` | Single LLM call — no knowledge retrieval or tool calling |
-| `run(prompt)` | Full agentic loop — knowledge retrieval + tool-calling until text response |
+| `ask(prompt)` | Single LLM call with optional knowledge retrieval; no tool calling |
+| `run(prompt)` | Full agentic loop — knowledge retrieval + tool calling until text response |
+| `chat(message)` | Like `run()` but accumulates conversation history across calls |
+| `reset_conversation()` | Clear the stored conversation history |
 | `register_tool(fn)` | Register a function as a tool; usable as a decorator |
 | `ingest_knowledge(save)` | Parse, embed, and index documents in `knowledge_folder_path` |
 | `load_knowledge()` | Restore a previously saved index from `knowledge_index_dir` |
+| `retrieve_knowledge(query)` | Manually retrieve the top-k chunks for a query |
 
 ### Other exports
 
