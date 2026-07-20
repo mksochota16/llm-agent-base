@@ -169,13 +169,33 @@ agent = AgentBase(
     knowledge_top_k=3,                # number of chunks injected per prompt
 )
 
+# Load from disk if a saved index exists, otherwise ingest and save automatically
+agent.load_or_ingest_knowledge()
+
+print(agent.run("Who founded the company and when?"))
+```
+
+Pass `auto_load_or_ingest=True` to do this in the constructor:
+
+```python
+agent = AgentBase(
+    system_prompt="You are a product assistant. Answer using only the provided context.",
+    llm_config=config,
+    knowledge_folder_path="knowledge",
+    auto_load_or_ingest=True,
+)
+
+print(agent.run("Who founded the company and when?"))
+```
+
+For more control, call `ingest_knowledge()` and `load_knowledge()` directly:
+
+```python
 # Build and persist the index (run once, or when documents change)
 agent.ingest_knowledge(save=True)
 
 # On subsequent runs, load from disk instead of re-embedding
-# agent.load_knowledge()
-
-print(agent.run("Who founded the company and when?"))
+agent.load_knowledge()
 ```
 
 ### File attachments
@@ -259,6 +279,7 @@ agent = AgentBase(..., debug=True)
 | `knowledge_folder_path` | `str \| None` | `None` | Folder of documents to index for RAG |
 | `knowledge_index_dir` | `str` | `".kb_index"` | Directory where the FAISS index is persisted |
 | `knowledge_top_k` | `int` | `5` | Number of chunks injected per prompt |
+| `auto_load_or_ingest` | `bool` | `False` | Load saved index on init, or ingest and save if none exists |
 | `debug` | `bool` | `False` | Print tool calls and retrievals to stdout |
 
 | Method | Description |
@@ -270,6 +291,7 @@ agent = AgentBase(..., debug=True)
 | `register_tool(fn)` | Register a function as a tool; usable as a decorator |
 | `ingest_knowledge(save)` | Parse, embed, and index documents in `knowledge_folder_path` |
 | `load_knowledge()` | Restore a previously saved index from `knowledge_index_dir` |
+| `load_or_ingest_knowledge()` | Load saved index if one exists, otherwise ingest and save |
 | `retrieve_knowledge(query)` | Manually retrieve the top-k chunks for a query |
 
 ### Other exports

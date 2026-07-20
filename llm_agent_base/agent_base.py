@@ -50,6 +50,7 @@ class AgentBase:
         knowledge_folder_path: Optional[str] = None,
         knowledge_index_dir: str = ".kb_index",
         knowledge_top_k: int = 5,
+        auto_load_or_ingest: bool = False,
         temperature: Optional[float] = None,
         response_format: Optional[dict] = None,
         debug: bool = False,
@@ -72,6 +73,8 @@ class AgentBase:
                 index_dir=knowledge_index_dir,
             )
             self._register_knowledge_tool()
+            if auto_load_or_ingest:
+                self.load_or_ingest_knowledge()
 
     def register_tool(self, fn: Callable) -> Callable:
         """Register a Python function as a callable tool. Can be used as a decorator."""
@@ -101,6 +104,17 @@ class AgentBase:
     def load_knowledge(self):
         if self._kb is not None:
             self._kb.load()
+
+    def load_or_ingest_knowledge(self) -> int:
+        """Load a saved index if one exists, otherwise ingest and save. Returns the number of chunks ingested (0 if loaded)."""
+        if self._kb is None:
+            return 0
+        if (self._kb.index_dir / "index.faiss").exists():
+            self._kb.load()
+            return 0
+        count = self._kb.ingest()
+        self._kb.save()
+        return count
 
     def retrieve_knowledge(self, query: str) -> list[DocumentChunk]:
         if self._kb is None:
