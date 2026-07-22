@@ -18,7 +18,7 @@ pip install llm-agent-base
 - **File attachments** — pass images, PDFs, and text files directly to `ask()`, `run()`, or `chat()` via the `files` parameter
 - **Tool calling** — register plain Python functions as LLM-callable tools; schemas are built automatically from type hints and docstrings
 - **RAG** — ingest a folder of documents (`.txt`, `.md`, `.json`, `.pdf`) into a FAISS vector index and inject relevant chunks into every prompt
-- **Knowledge search tool** — when a knowledge base is configured, the agent automatically gains a `search_knowledge` tool it can call mid-reasoning for targeted lookups
+- **Knowledge search tool** — when a knowledge base is configured, the agent automatically gains a `search_knowledge` tool (semantic/vector) and a `read_knowledge_files` tool (keyword search returning full file contents); both are optional and independently toggleable
 - **Pipelines** — chain multiple agents so each agent's output becomes the next agent's input
 - **Temperature control** — set per-agent temperature for precise or creative responses
 - **Response format** — enforce JSON output or structured schemas via the OpenAI response format API
@@ -145,7 +145,12 @@ print(agent.chat("What is my name?"))  # history cleared, agent no longer knows
 
 Place your documents in a folder (organised into subdirectories by topic). Call `ingest_knowledge` once to embed and index them, then use `run`, `ask`, or `chat` — relevant chunks are automatically retrieved and injected into the system prompt on every call.
 
-When a knowledge base is configured, the agent also registers a `search_knowledge` tool automatically. This lets the LLM perform targeted knowledge lookups mid-reasoning, in addition to the upfront retrieval that seeds each prompt.
+When a knowledge base is configured, the agent registers two tools the LLM can call mid-reasoning:
+
+- **`search_knowledge`** — semantic vector search; returns the most relevant chunks for a query. Requires an ingested FAISS index.
+- **`read_knowledge_files`** — keyword search by filename or file content; returns complete file text. Works directly on files without a vector index.
+
+Both tools are enabled by default. Use `knowledge_search_tool=False` or `knowledge_file_tool=False` to disable either one.
 
 ```
 knowledge/
@@ -197,6 +202,45 @@ agent.ingest_knowledge(save=True)
 # On subsequent runs, load from disk instead of re-embedding
 agent.load_knowledge()
 ```
+
+#### Keyword file search without a vector index
+
+`read_knowledge_files` searches filenames and file contents directly — no embedding or FAISS index needed. Disable `search_knowledge` to use only this tool:
+
+```python
+agent = AgentBase(
+    system_prompt="You are a product assistant. Answer using only the provided context.",
+    llm_config=config,
+    knowledge_folder_path="knowledge",
+    knowledge_search_tool=False,  # no vector index required
+)
+
+print(agent.run("What are the support SLA terms?"))
+```
+
+The LLM can search with fine-grained control over where to look and how many keywords must match:
+
+```python
+# filename or content, at least 2 of the 3 keywords must match
+read_knowledge_files(
+    keywords=["pricing plan", "enterprise", "discount"],
+    search_in="both",
+    match_mode="min",
+    min_matches=2,
+)
+```
+
+| `search_in` | Where keywords are matched |
+|---|---|
+| `"filename"` | File name only |
+| `"content"` | File contents only |
+| `"both"` (default) | Filename first, then contents |
+
+| `match_mode` | Files returned |
+|---|---|
+| `"any"` (default) | At least one keyword matches |
+| `"all"` | Every keyword must match |
+| `"min"` | At least `min_matches` keywords match |
 
 ### File attachments
 
@@ -280,6 +324,8 @@ agent = AgentBase(..., debug=True)
 | `knowledge_index_dir` | `str` | `".kb_index"` | Directory where the FAISS index is persisted |
 | `knowledge_top_k` | `int` | `5` | Number of chunks injected per prompt |
 | `auto_load_or_ingest` | `bool` | `False` | Load saved index on init, or ingest and save if none exists |
+| `knowledge_search_tool` | `bool` | `True` | Register the `search_knowledge` semantic vector search tool |
+| `knowledge_file_tool` | `bool` | `True` | Register the `read_knowledge_files` keyword file search tool |
 | `debug` | `bool` | `False` | Print tool calls and retrievals to stdout |
 
 | Method | Description |
@@ -293,6 +339,15 @@ agent = AgentBase(..., debug=True)
 | `load_knowledge()` | Restore a previously saved index from `knowledge_index_dir` |
 | `load_or_ingest_knowledge()` | Load saved index if one exists, otherwise ingest and save |
 | `retrieve_knowledge(query)` | Manually retrieve the top-k chunks for a query |
+
+**`read_knowledge_files` tool parameters** (called by the LLM, not directly):
+
+| Parameter | Type | Default | Description |
+|---|---|---|---|
+| `keywords` | `list[str]` | — | Phrases to search for; each entry matched as-is |
+| `search_in` | `str` | `"both"` | `"filename"`, `"content"`, or `"both"` |
+| `match_mode` | `str` | `"any"` | `"any"` (OR), `"all"` (AND), or `"min"` (at least `min_matches`) |
+| `min_matches` | `int \| None` | `None` | Minimum number of matching keywords when `match_mode="min"` |
 
 ### Other exports
 

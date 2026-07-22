@@ -51,6 +51,8 @@ class AgentBase:
         knowledge_index_dir: str = ".kb_index",
         knowledge_top_k: int = 5,
         auto_load_or_ingest: bool = False,
+        knowledge_search_tool: bool = True,
+        knowledge_file_tool: bool = True,
         temperature: Optional[float] = None,
         response_format: Optional[dict] = None,
         debug: bool = False,
@@ -72,7 +74,7 @@ class AgentBase:
                 llm_config=llm_config,
                 index_dir=knowledge_index_dir,
             )
-            self._register_knowledge_tool()
+            self._register_knowledge_tool(knowledge_search_tool, knowledge_file_tool)
             if auto_load_or_ingest:
                 self.load_or_ingest_knowledge()
 
@@ -81,7 +83,7 @@ class AgentBase:
         self._tools[fn.__name__] = (fn, build_tool_schema(fn))
         return fn
 
-    def _register_knowledge_tool(self) -> None:
+    def _register_knowledge_tool(self, search_tool: bool = True, file_tool: bool = True) -> None:
         def search_knowledge(query: str) -> str:
             """Search the knowledge base for information relevant to the query. Use this when you need to look up facts, context, or details that may be stored in the available knowledge."""
             chunks = self._kb.retrieve(query, top_k=self.knowledge_top_k)
@@ -91,7 +93,53 @@ class AgentBase:
                 print(f"[debug] search_knowledge query={query!r} returned {len(chunks)} chunk(s)")
             return "\n\n".join(f"[{c.source}]\n{c.text}" for c in chunks)
 
-        self._tools["search_knowledge"] = (search_knowledge, build_tool_schema(search_knowledge))
+        def read_knowledge_files(
+            keywords: list,
+            search_in: str = "both",
+            match_mode: str = "any",
+            min_matches: Optional[int] = None,
+        ) -> str:
+            """Find files in the knowledge base and return their full text. Each entry in 'keywords' is treated as a single phrase (not split). 'search_in' controls where to look: 'filename', 'content', or 'both'. 'match_mode' controls how many keywords must match: 'any' (at least one), 'all' (every keyword), or 'min' (at least min_matches keywords). Use this when you need complete file contents rather than a few relevant chunks."""
+            terms = [k.lower() for k in keywords if isinstance(k, str) and k.strip()]
+            if not terms:
+                return "No keywords provided."
+
+            def _hits(text: str) -> int:
+                lower = text.lower()
+                return sum(1 for t in terms if t in lower)
+
+            def _matches(text: str) -> bool:
+                n = _hits(text)
+                if match_mode == "all":
+                    return n == len(terms)
+                if match_mode == "min":
+                    return n >= (min_matches or 1)
+                return n >= 1
+
+            results = []
+            for path in sorted(self._kb.folder_path.rglob("*")):
+                if path.suffix.lower() not in self._kb.SUPPORTED_EXTENSIONS:
+                    continue
+                relative = str(path.relative_to(self._kb.folder_path))
+                check_filename = search_in in ("filename", "both")
+                check_content = search_in in ("content", "both")
+                if check_filename and _matches(path.name):
+                    results.append(f"[{relative}]\n{_read_file_as_text(path)}")
+                    continue
+                if check_content:
+                    text = _read_file_as_text(path)
+                    if _matches(text):
+                        results.append(f"[{relative}]\n{text}")
+            if not results:
+                return f"No files found matching: {keywords}"
+            if self.debug:
+                print(f"[debug] read_knowledge_files keywords={keywords!r} matched {len(results)} file(s)")
+            return "\n\n---\n\n".join(results)
+
+        if search_tool:
+            self._tools["search_knowledge"] = (search_knowledge, build_tool_schema(search_knowledge))
+        if file_tool:
+            self._tools["read_knowledge_files"] = (read_knowledge_files, build_tool_schema(read_knowledge_files))
 
     def ingest_knowledge(self, save: bool = True) -> int:
         if self._kb is None:
