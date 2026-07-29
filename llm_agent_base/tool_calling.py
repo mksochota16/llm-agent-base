@@ -1,6 +1,9 @@
 import inspect
 import json
+import re
 from typing import Callable, Union, get_args, get_origin, get_type_hints
+
+_MAX_TEXT_TOOL_CALLS = 5
 
 _JSON_TYPE_MAP = {
     str: "string",
@@ -54,6 +57,54 @@ def build_tool_schema(fn: Callable) -> dict:
     }
 
 
+def _extract_text_tool_call(text: str) -> tuple[str, dict] | None:
+    """Find an inline tool-call JSON object in ``text``.
+
+    Returns ``(tool_name, arguments_dict)`` or ``None``.
+    """
+    if not text or "{" not in text:
+        return None
+    decoder = json.JSONDecoder()
+    for i, ch in enumerate(text):
+        if ch != "{":
+            continue
+        try:
+            obj, _ = decoder.raw_decode(text[i:])
+        except json.JSONDecodeError:
+            continue
+        if not isinstance(obj, dict):
+            continue
+        name = obj.get("name")
+        args = obj.get("arguments")
+        if isinstance(name, str) and isinstance(args, dict):
+            return name, args
+    return None
+
+
+def _strip_tool_call(text: str, tool_name: str) -> str:
+    """Remove a leading/standalone tool-call JSON object from ``text``."""
+    pattern = re.compile(
+        r"^\s*```(?:json)?\s*\{[^`]*?\"name\"\s*:\s*\""
+        + re.escape(tool_name)
+        + r"\"[^`]*?}\s*```\s*",
+        re.DOTALL,
+    )
+    stripped = pattern.sub("", text, count=1)
+    if stripped != text:
+        return stripped
+    decoder = json.JSONDecoder()
+    for i, ch in enumerate(text):
+        if ch != "{":
+            continue
+        try:
+            obj, end = decoder.raw_decode(text[i:])
+        except json.JSONDecodeError:
+            continue
+        if isinstance(obj, dict) and obj.get("name") == tool_name:
+            return text[:i] + text[i + end:]
+    return text
+
+
 def execute_tool_loop(
     client,
     model: str,
@@ -63,8 +114,14 @@ def execute_tool_loop(
     temperature: float | None = None,
     response_format: dict | None = None,
 ) -> str:
-    """Run the agentic tool-calling loop and return the final text response."""
+    """Run the agentic tool-calling loop and return the final text response.
+
+    Handles both structural tool calls (via ``message.tool_calls``) and tool
+    calls emitted as inline JSON text in ``message.content`` (a behavior seen
+    with some OpenAI-compatible endpoints, e.g. GLM models).
+    """
     tool_schemas = [schema for _, schema in tools.values()]
+    text_tool_calls = 0
 
     while True:
         kwargs = {"model": model, "messages": messages}
@@ -79,28 +136,58 @@ def execute_tool_loop(
         choice = response.choices[0]
         msg = choice.message
 
-        if choice.finish_reason != "tool_calls" or not msg.tool_calls:
-            return msg.content
-
-        messages.append(msg)
-
-        for tc in msg.tool_calls:
-            fn, _ = tools.get(tc.function.name, (None, None))
-            if fn is None:
-                result = f"Error: unknown tool '{tc.function.name}'"
-                if debug:
-                    print(f"[debug] LLM called unknown tool '{tc.function.name}'")
-            else:
-                try:
-                    args = json.loads(tc.function.arguments)
-                    result = str(fn(**args))
+        # Structural tool calls: execute and feed back (existing behavior).
+        if choice.finish_reason == "tool_calls" and msg.tool_calls:
+            messages.append(msg)
+            for tc in msg.tool_calls:
+                fn, _ = tools.get(tc.function.name, (None, None))
+                if fn is None:
+                    result = f"Error: unknown tool '{tc.function.name}'"
                     if debug:
-                        print(f"[debug] tool '{tc.function.name}' args={args} result={result}")
-                except Exception as e:
-                    result = f"Error: {e}"
+                        print(f"[debug] LLM called unknown tool '{tc.function.name}'")
+                else:
+                    try:
+                        args = json.loads(tc.function.arguments)
+                        result = str(fn(**args))
+                        if debug:
+                            print(f"[debug] tool '{tc.function.name}' args={args} result={result}")
+                    except Exception as e:
+                        result = f"Error: {e}"
+                messages.append({
+                    "role": "tool",
+                    "tool_call_id": tc.id,
+                    "content": result,
+                })
+            continue
 
+        # No structural tool calls: check for a tool call emitted as inline
+        # JSON text before returning the content as the final answer.
+        content = msg.content
+        found = _extract_text_tool_call(content) if content else None
+        if (
+            found is not None
+            and found[0] in tools
+            and text_tool_calls < _MAX_TEXT_TOOL_CALLS
+        ):
+            tool_name, args = found
+            fn, _ = tools[tool_name]
+            try:
+                result = str(fn(**args))
+                if debug:
+                    print(f"[debug] text tool call '{tool_name}' args={args} result={result}")
+            except Exception as e:
+                result = f"Error: {e}"
+                if debug:
+                    print(f"[debug] text tool call '{tool_name}' raised: {e}")
+            assistant_text = _strip_tool_call(content, tool_name).strip()
+            if assistant_text:
+                messages.append({"role": "assistant", "content": assistant_text})
             messages.append({
                 "role": "tool",
-                "tool_call_id": tc.id,
+                "tool_call_id": f"text_{tool_name}",
                 "content": result,
             })
+            text_tool_calls += 1
+            continue
+
+        return content
