@@ -60,6 +60,9 @@ def build_tool_schema(fn: Callable) -> dict:
 def _extract_text_tool_call(text: str) -> tuple[str, dict] | None:
     """Find an inline tool-call JSON object in ``text``.
 
+    Recognizes both the ``{"name": <tool>, "arguments": {<args>}}`` shape and
+    the single-key ``{<tool>: {<args>}}`` shape emitted by some models.
+
     Returns ``(tool_name, arguments_dict)`` or ``None``.
     """
     if not text or "{" not in text:
@@ -78,6 +81,10 @@ def _extract_text_tool_call(text: str) -> tuple[str, dict] | None:
         args = obj.get("arguments")
         if isinstance(name, str) and isinstance(args, dict):
             return name, args
+        if len(obj) == 1:
+            key, value = next(iter(obj.items()))
+            if isinstance(key, str) and isinstance(value, dict):
+                return key, value
     return None
 
 
@@ -100,7 +107,11 @@ def _strip_tool_call(text: str, tool_name: str) -> str:
             obj, end = decoder.raw_decode(text[i:])
         except json.JSONDecodeError:
             continue
-        if isinstance(obj, dict) and obj.get("name") == tool_name:
+        if not isinstance(obj, dict):
+            continue
+        if obj.get("name") == tool_name:
+            return text[:i] + text[i + end:]
+        if len(obj) == 1 and isinstance(obj.get(tool_name), dict):
             return text[:i] + text[i + end:]
     return text
 

@@ -90,7 +90,14 @@ print(json_agent.ask('Return {"city": "Paris", "country": "France"}'))
 
 Register any Python function as a tool. The function name becomes the tool name, the docstring becomes its description, and the type hints define the parameter schema.
 
-The tool-calling loop handles both the standard OpenAI `tool_calls` field and the fallback case where a model emits a tool call as inline JSON text in the message content — a behaviour seen on some OpenAI-compatible endpoints (e.g. GLM models). When an inline call is detected and the tool name is registered, the tool is executed, the result is fed back, and the loop continues exactly as with a structural call. Unknown tool names and non-tool JSON are returned unchanged. A safety cap of 5 consecutive text-emitted calls prevents infinite loops.
+The tool-calling loop handles both the standard OpenAI `tool_calls` field and the fallback case where a model emits a tool call as inline JSON text in the message content — a behaviour seen on some OpenAI-compatible endpoints (e.g. GLM models). Two inline shapes are recognised:
+
+```json
+{"name": "get_weather", "arguments": {"city": "Tokyo"}}
+{"get_weather": {"city": "Tokyo"}}
+```
+
+The second form — the tool name as the single top-level key, arguments as the nested object — is also produced by GLM models. When an inline call is detected and the tool name is registered, the tool is executed, the result is fed back, and the loop continues exactly as with a structural call. Unknown tool names and non-tool JSON are returned unchanged. A safety cap of 5 consecutive text-emitted calls prevents infinite loops.
 
 ```python
 from llm_agent_base import AgentBase, LLMConnectionConfig
