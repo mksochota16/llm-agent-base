@@ -1,7 +1,8 @@
 import inspect
 import json
 import re
-from typing import Callable, Union, get_args, get_origin, get_type_hints
+from enum import Enum
+from typing import Callable, Literal, Union, get_args, get_origin, get_type_hints
 
 _MAX_TEXT_TOOL_CALLS = 5
 _MAX_ITERATIONS = 10
@@ -31,16 +32,127 @@ def _to_json_type(tp) -> str:
     return _JSON_TYPE_MAP.get(tp, "string")
 
 
+def _json_schema_for(tp) -> dict:
+    """Build a JSON Schema fragment for a single type annotation.
+
+    Resolves container item types and enum values, which strict providers
+    require and which measurably improve tool-calling accuracy.
+    """
+    if _is_optional(tp):
+        tp = _unwrap_optional(tp)
+
+    origin = get_origin(tp)
+
+    if origin is Literal:
+        values = list(get_args(tp))
+        item_type = _to_json_type(type(values[0])) if values else "string"
+        return {"type": item_type, "enum": values}
+
+    if isinstance(tp, type) and issubclass(tp, Enum):
+        values = [m.value for m in tp]
+        item_type = _to_json_type(type(values[0])) if values else "string"
+        return {"type": item_type, "enum": values}
+
+    if origin in (list, set, frozenset, tuple) or tp in (list, set, frozenset, tuple):
+        schema: dict = {"type": "array"}
+        args = [a for a in get_args(tp) if a is not Ellipsis]
+        if args:
+            schema["items"] = _json_schema_for(args[0])
+        return schema
+
+    if origin is dict or tp is dict:
+        return {"type": "object"}
+
+    return {"type": _JSON_TYPE_MAP.get(tp, "string")}
+
+
+_ARGS_HEADER_RE = re.compile(r"^(args|arguments|parameters)\s*:\s*$", re.IGNORECASE)
+_SECTION_HEADER_RE = re.compile(
+    r"^(returns?|raises?|yields?|examples?|notes?|attributes?)\s*:\s*$", re.IGNORECASE
+)
+_GOOGLE_PARAM_RE = re.compile(r"^(\w+)\s*(?:\([^)]*\))?\s*:\s*(.*)$")
+_SPHINX_PARAM_RE = re.compile(r"^:param\s+(?:[^:]+\s+)?(\w+)\s*:\s*(.*)$")
+
+
+def _parse_docstring(doc: str) -> tuple[str, dict[str, str]]:
+    """Split a docstring into its summary and per-parameter descriptions.
+
+    Understands Google style (an ``Args:`` section) and Sphinx style
+    (``:param name:`` lines). Returns ``(summary, {param_name: description})``.
+    """
+    if not doc:
+        return "", {}
+
+    summary_lines: list[str] = []
+    params: dict[str, str] = {}
+    in_args = False
+    # Once any section starts, the summary is over — trailing sections such as
+    # Returns:/Raises: must not leak into the tool description.
+    seen_section = False
+    current: str | None = None
+
+    for raw in doc.splitlines():
+        line = raw.strip()
+
+        if _ARGS_HEADER_RE.match(line):
+            in_args, current, seen_section = True, None, True
+            continue
+        if _SECTION_HEADER_RE.match(line):
+            in_args, current, seen_section = False, None, True
+            continue
+
+        sphinx = _SPHINX_PARAM_RE.match(line)
+        if sphinx:
+            current = sphinx.group(1)
+            params[current] = sphinx.group(2).strip()
+            seen_section = True
+            continue
+
+        if line.startswith(":"):
+            # Some other Sphinx field (:returns:, :rtype:) — ends the parameter.
+            current, seen_section = None, True
+            continue
+
+        if in_args:
+            if not line:
+                current = None
+            elif (google := _GOOGLE_PARAM_RE.match(line)):
+                current = google.group(1)
+                params[current] = google.group(2).strip()
+            elif current:
+                # Continuation of the previous parameter's description.
+                params[current] = f"{params[current]} {line}".strip()
+            continue
+
+        if current is not None:
+            # Continuation of a Sphinx :param: description.
+            if line:
+                params[current] = f"{params[current]} {line}".strip()
+            else:
+                current = None
+            continue
+
+        if not seen_section:
+            summary_lines.append(line)
+
+    summary = "\n".join(summary_lines).strip()
+    return summary, {k: v for k, v in params.items() if v}
+
+
 def build_tool_schema(fn: Callable) -> dict:
     hints = get_type_hints(fn)
     hints.pop("return", None)
     sig = inspect.signature(fn)
+    summary, param_docs = _parse_docstring(inspect.getdoc(fn) or "")
 
     properties = {}
     required = []
     for name, param in sig.parameters.items():
         tp = hints.get(name, str)
-        properties[name] = {"type": _to_json_type(tp)}
+        schema = _json_schema_for(tp)
+        if name in param_docs:
+            schema["description"] = param_docs[name]
+        properties[name] = schema
         if not _is_optional(tp) and param.default is inspect.Parameter.empty:
             required.append(name)
 
@@ -48,7 +160,7 @@ def build_tool_schema(fn: Callable) -> dict:
         "type": "function",
         "function": {
             "name": fn.__name__,
-            "description": inspect.getdoc(fn) or "",
+            "description": summary,
             "parameters": {
                 "type": "object",
                 "properties": properties,

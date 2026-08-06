@@ -16,8 +16,9 @@ pip install llm-agent-base
 - **Agentic loop** — `run()` with knowledge retrieval and tool calling until a final text response
 - **Conversational chat** — `chat()` maintains conversation history across calls; `reset_conversation()` starts fresh
 - **File attachments** — pass images, PDFs, and text files directly to `ask()`, `run()`, or `chat()` via the `files` parameter
-- **Tool calling** — register plain Python functions as LLM-callable tools; schemas are built automatically from type hints and docstrings
+- **Tool calling** — register plain Python functions as LLM-callable tools; schemas are built automatically from type hints and docstrings, including per-parameter descriptions and enum values
 - **RAG** — ingest a folder of documents (`.txt`, `.md`, `.json`, `.pdf`) into a FAISS vector index and inject relevant chunks into every prompt
+- **Incremental re-indexing** — edit a document and only that file is re-embedded; unchanged chunks keep their vectors
 - **Knowledge search tool** — when a knowledge base is configured, the agent automatically gains a `search_knowledge` tool (semantic/vector) and a `read_knowledge_files` tool (keyword search returning full file contents); both are optional and independently toggleable
 - **Pipelines** — chain multiple agents so each agent's output becomes the next agent's input
 - **Temperature control** — set per-agent temperature for precise or creative responses
@@ -89,6 +90,19 @@ print(json_agent.ask('Return {"city": "Paris", "country": "France"}'))
 ### Tool calling
 
 Register any Python function as a tool. The function name becomes the tool name, the docstring becomes its description, and the type hints define the parameter schema.
+
+Schema generation reads more than the bare type. A docstring `Args:` section (Google style) or `:param name:` lines (Sphinx style) become per-parameter descriptions, `Literal` and `Enum` annotations become `enum` constraints, and `list[str]` gets a proper `items` type — which strict endpoints require and which measurably improves how accurately the model fills arguments. `Returns:`/`Raises:` sections are kept out of the tool description.
+
+```python
+@agent.register_tool
+def search_orders(customer: str, status: Literal["open", "shipped", "cancelled"] = "open") -> str:
+    """Look up a customer's orders.
+
+    Args:
+        customer: The customer's account ID.
+        status: Which order state to filter on.
+    """
+```
 
 The tool-calling loop handles both the standard OpenAI `tool_calls` field and the fallback case where a model emits a tool call as inline JSON text in the message content — a behaviour seen on some OpenAI-compatible endpoints (e.g. GLM models). Two inline shapes are recognised:
 
@@ -226,6 +240,32 @@ agent.ingest_knowledge(save=True)
 agent.load_knowledge()
 ```
 
+#### Keeping the index current
+
+`load_or_ingest_knowledge()` compares a content hash of every source file against the saved index. If documents were added, edited, or deleted, only those files are re-embedded — everything else keeps its existing vector. Editing one file in a 500-document corpus costs one file's worth of embedding calls, not 500.
+
+Call `sync_knowledge()` to do it explicitly:
+
+```python
+summary = agent.sync_knowledge()
+# {'added': 1, 'updated': 1, 'removed': 0,
+#  'reused_chunks': 128, 'embedded_chunks': 4, 'total_chunks': 132}
+```
+
+Embeddings are sent in batches (100 chunks per request by default), so a first-time ingest of 1 000 chunks is 10 requests rather than 1 000.
+
+#### Filtering weak matches
+
+`retrieve` returns chunks in similarity order, each carrying its cosine similarity in `score`. By default it always returns `knowledge_top_k` chunks, even when none are actually relevant. Set `knowledge_min_score` to drop weak matches instead:
+
+```python
+agent = AgentBase(
+    ...,
+    knowledge_top_k=5,
+    knowledge_min_score=0.35,  # return fewer than 5 rather than pad with noise
+)
+```
+
 #### Keyword file search without a vector index
 
 `read_knowledge_files` searches filenames and file contents directly — no embedding or FAISS index needed. Disable `search_knowledge` to use only this tool:
@@ -324,6 +364,18 @@ agent = AgentBase(..., debug=True)
 [debug] tool 'get_weather' args={'city': 'Tokyo'} result=The weather in Tokyo is sunny and 22°C.
 ```
 
+## Upgrading to 0.3.0
+
+The knowledge index catalog is now stored as `catalog.json` instead of `catalog.pkl`. Loading an index required unpickling it, which meant a saved index could execute arbitrary code — so the pickle path was removed rather than kept as a fallback.
+
+Existing indexes are not readable. Delete the index directory and re-ingest once:
+
+```python
+agent.ingest_knowledge(save=True)   # or just delete .kb_index and run as usual
+```
+
+`load_knowledge()` raises a `FileNotFoundError` explaining this if it finds a legacy `catalog.pkl`.
+
 ## API reference
 
 ### `LLMConnectionConfig`
@@ -334,6 +386,8 @@ agent = AgentBase(..., debug=True)
 | `base_url` | `str` | OpenRouter | API base URL |
 | `api_key` | `str \| None` | `None` | API key (falls back to `OPENROUTER_API_KEY` env var) |
 | `embedding_model` | `str` | `"openai/text-embedding-3-small"` | Model used for RAG embeddings |
+| `max_retries` | `int` | `3` | Retries on 429/5xx/connection errors, with exponential backoff and jitter |
+| `timeout` | `float \| None` | `None` | Per-request timeout in seconds (SDK default when omitted) |
 
 ### `AgentBase`
 
@@ -346,6 +400,7 @@ agent = AgentBase(..., debug=True)
 | `knowledge_folder_path` | `str \| None` | `None` | Folder of documents to index for RAG |
 | `knowledge_index_dir` | `str` | `".kb_index"` | Directory where the FAISS index is persisted |
 | `knowledge_top_k` | `int` | `5` | Number of chunks injected per prompt |
+| `knowledge_min_score` | `float \| None` | `None` | Drop retrieved chunks below this cosine similarity |
 | `auto_load_or_ingest` | `bool` | `False` | Load saved index on init, or ingest and save if none exists |
 | `knowledge_search_tool` | `bool` | `True` | Register the `search_knowledge` semantic vector search tool |
 | `knowledge_file_tool` | `bool` | `True` | Register the `read_knowledge_files` keyword file search tool |
@@ -363,7 +418,8 @@ agent = AgentBase(..., debug=True)
 | `register_tool(fn)` | Register a function as a tool; usable as a decorator |
 | `ingest_knowledge(save)` | Parse, embed, and index documents in `knowledge_folder_path` |
 | `load_knowledge()` | Restore a previously saved index from `knowledge_index_dir` |
-| `load_or_ingest_knowledge()` | Load saved index if one exists, otherwise ingest and save |
+| `load_or_ingest_knowledge()` | Load saved index if one exists (re-syncing changed files), otherwise ingest and save |
+| `sync_knowledge(save)` | Re-embed only the source files that changed since the last ingest |
 | `retrieve_knowledge(query)` | Manually retrieve the top-k chunks for a query |
 
 **`read_knowledge_files` tool parameters** (called by the LLM, not directly):
@@ -380,7 +436,7 @@ agent = AgentBase(..., debug=True)
 | Class / function | Description |
 |---|---|
 | `AgentPipelineBase` | Chains multiple `AgentBase` instances in sequence |
-| `KnowledgeBase` | Document ingestion, embedding, and FAISS retrieval |
-| `DocumentChunk` | Dataclass representing a retrieved text chunk |
-| `build_tool_schema` | Builds an OpenAI-compatible tool schema from a function |
+| `KnowledgeBase` | Document ingestion, embedding, and FAISS retrieval; `sync()` re-embeds only changed files |
+| `DocumentChunk` | Dataclass representing a retrieved text chunk, including its `score` |
+| `build_tool_schema` | Builds an OpenAI-compatible tool schema from a function's hints and docstring |
 | `execute_tool_loop` | Runs the agentic tool-calling loop against any OpenAI-compatible client; handles both structural `tool_calls` and inline JSON text tool calls |

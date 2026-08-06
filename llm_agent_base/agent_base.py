@@ -1,7 +1,7 @@
 import base64
 import mimetypes
 from pathlib import Path
-from typing import Callable, Optional, Union
+from typing import Callable, Literal, Optional, Union
 
 from .knowledge_base import DocumentChunk, KnowledgeBase
 from .llm_connection_config import LLMConnectionConfig
@@ -52,6 +52,7 @@ class AgentBase:
         knowledge_folder_path: Optional[str] = None,
         knowledge_index_dir: str = ".kb_index",
         knowledge_top_k: int = 5,
+        knowledge_min_score: Optional[float] = None,
         auto_load_or_ingest: bool = False,
         knowledge_search_tool: bool = True,
         knowledge_file_tool: bool = True,
@@ -65,6 +66,7 @@ class AgentBase:
         self.system_prompt = system_prompt
         self.llm_config = llm_config
         self.knowledge_top_k = knowledge_top_k
+        self.knowledge_min_score = knowledge_min_score
         self.knowledge_file_max_chars = knowledge_file_max_chars
         self.temperature = temperature
         self.response_format = response_format
@@ -93,8 +95,16 @@ class AgentBase:
 
     def _register_knowledge_tool(self, search_tool: bool = True, file_tool: bool = True) -> None:
         def search_knowledge(query: str) -> str:
-            """Search the knowledge base for information relevant to the query. Use this when you need to look up facts, context, or details that may be stored in the available knowledge."""
-            chunks = self._kb.retrieve(query, top_k=self.knowledge_top_k)
+            """Search the knowledge base for information relevant to the query. Use this when you need to look up facts, context, or details that may be stored in the available knowledge.
+
+            Args:
+                query: What to look for, phrased as a natural-language question or topic.
+            """
+            chunks = self._kb.retrieve(
+                query,
+                top_k=self.knowledge_top_k,
+                min_score=self.knowledge_min_score,
+            )
             if not chunks:
                 return "No relevant information found in the knowledge base."
             if self.debug:
@@ -102,12 +112,19 @@ class AgentBase:
             return "\n\n".join(f"[{c.source}]\n{c.text}" for c in chunks)
 
         def read_knowledge_files(
-            keywords: list,
-            search_in: str = "both",
-            match_mode: str = "any",
+            keywords: list[str],
+            search_in: Literal["filename", "content", "both"] = "both",
+            match_mode: Literal["any", "all", "min"] = "any",
             min_matches: Optional[int] = None,
         ) -> str:
-            """Find files in the knowledge base and return their full text. Each entry in 'keywords' is treated as a single phrase (not split). 'search_in' controls where to look: 'filename', 'content', or 'both'. 'match_mode' controls how many keywords must match: 'any' (at least one), 'all' (every keyword), or 'min' (at least min_matches keywords). Use this when you need complete file contents rather than a few relevant chunks."""
+            """Find files in the knowledge base and return their full text. Use this when you need complete file contents rather than a few relevant chunks.
+
+            Args:
+                keywords: Phrases to search for. Each entry is matched as a whole phrase, not split into words.
+                search_in: Where to match keywords: 'filename', 'content', or 'both'.
+                match_mode: How many keywords must match: 'any' (at least one), 'all' (every keyword), or 'min' (at least min_matches).
+                min_matches: Minimum number of matching keywords, used only when match_mode is 'min'.
+            """
             terms = [k.lower() for k in keywords if isinstance(k, str) and k.strip()]
             if not terms:
                 return "No keywords provided."
@@ -181,13 +198,36 @@ class AgentBase:
         if self._kb is not None:
             self._kb.load()
 
+    def sync_knowledge(self, save: bool = True) -> dict:
+        """Re-embed only the source files that changed since the last ingest."""
+        if self._kb is None:
+            return {}
+        summary = self._kb.sync()
+        if save:
+            self._kb.save()
+        if self.debug:
+            print(f"[debug] sync_knowledge {summary}")
+        return summary
+
     def load_or_ingest_knowledge(self) -> int:
-        """Load a saved index if one exists, otherwise ingest and save. Returns the number of chunks ingested (0 if loaded)."""
+        """Load a saved index if one exists, otherwise ingest and save.
+
+        A loaded index whose source files have changed is brought up to date
+        incrementally, so editing a document no longer leaves a stale index.
+        Returns the number of chunks embedded (0 when the index was reused
+        unchanged).
+        """
         if self._kb is None:
             return 0
-        if (self._kb.index_dir / "index.faiss").exists():
+        if self._kb.has_saved_index():
             self._kb.load()
-            return 0
+            if not self._kb.is_stale():
+                return 0
+            if self.debug:
+                print("[debug] knowledge index is stale; syncing changed files")
+            summary = self._kb.sync()
+            self._kb.save()
+            return summary.get("embedded_chunks", 0)
         count = self._kb.ingest()
         self._kb.save()
         return count
@@ -197,7 +237,11 @@ class AgentBase:
             return []
         if self.debug:
             print("[debug] Retrieving knowledge")
-        return self._kb.retrieve(query, top_k=self.knowledge_top_k)
+        return self._kb.retrieve(
+            query,
+            top_k=self.knowledge_top_k,
+            min_score=self.knowledge_min_score,
+        )
 
     def chat(self, message: str, files: Optional[list[str]] = None) -> str:
         """Send a message and get a response, maintaining conversation history across calls."""
