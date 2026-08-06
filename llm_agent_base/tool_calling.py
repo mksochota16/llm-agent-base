@@ -4,6 +4,7 @@ import re
 from typing import Callable, Union, get_args, get_origin, get_type_hints
 
 _MAX_TEXT_TOOL_CALLS = 5
+_MAX_ITERATIONS = 10
 
 _JSON_TYPE_MAP = {
     str: "string",
@@ -124,19 +125,30 @@ def execute_tool_loop(
     debug: bool = False,
     temperature: float | None = None,
     response_format: dict | None = None,
+    max_iterations: int = _MAX_ITERATIONS,
 ) -> str:
     """Run the agentic tool-calling loop and return the final text response.
 
     Handles both structural tool calls (via ``message.tool_calls``) and tool
     calls emitted as inline JSON text in ``message.content`` (a behavior seen
     with some OpenAI-compatible endpoints, e.g. GLM models).
+
+    ``max_iterations`` bounds how many rounds of tool calling are allowed. Once
+    the budget is spent the tools are withheld from the request, forcing the
+    model to answer in text, so the loop always terminates and always returns a
+    string.
     """
     tool_schemas = [schema for _, schema in tools.values()]
     text_tool_calls = 0
+    iterations = 0
 
     while True:
+        offer_tools = bool(tool_schemas) and iterations < max_iterations
+        if tool_schemas and not offer_tools and debug:
+            print(f"[debug] max_iterations ({max_iterations}) reached; requesting final answer without tools")
+
         kwargs = {"model": model, "messages": messages}
-        if tool_schemas:
+        if offer_tools:
             kwargs["tools"] = tool_schemas
         if temperature is not None:
             kwargs["temperature"] = temperature
@@ -144,6 +156,7 @@ def execute_tool_loop(
             kwargs["response_format"] = response_format
 
         response = client.chat.completions.create(**kwargs)
+        iterations += 1
         choice = response.choices[0]
         msg = choice.message
 
@@ -179,6 +192,7 @@ def execute_tool_loop(
             found is not None
             and found[0] in tools
             and text_tool_calls < _MAX_TEXT_TOOL_CALLS
+            and offer_tools
         ):
             tool_name, args = found
             fn, _ = tools[tool_name]
@@ -201,4 +215,4 @@ def execute_tool_loop(
             text_tool_calls += 1
             continue
 
-        return content
+        return content or ""

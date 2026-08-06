@@ -5,7 +5,9 @@ from typing import Callable, Optional, Union
 
 from .knowledge_base import DocumentChunk, KnowledgeBase
 from .llm_connection_config import LLMConnectionConfig
-from .tool_calling import build_tool_schema, execute_tool_loop
+from .tool_calling import _MAX_ITERATIONS, build_tool_schema, execute_tool_loop
+
+_DEFAULT_KNOWLEDGE_FILE_MAX_CHARS = 20_000
 
 _IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".gif", ".webp"}
 _TEXT_EXTENSIONS = {".txt", ".md", ".json", ".csv", ".xml", ".html", ".yaml", ".yml", ".py", ".js", ".ts"}
@@ -53,15 +55,21 @@ class AgentBase:
         auto_load_or_ingest: bool = False,
         knowledge_search_tool: bool = True,
         knowledge_file_tool: bool = True,
+        knowledge_file_max_chars: int = _DEFAULT_KNOWLEDGE_FILE_MAX_CHARS,
         temperature: Optional[float] = None,
         response_format: Optional[dict] = None,
+        max_iterations: int = _MAX_ITERATIONS,
+        max_history_messages: Optional[int] = None,
         debug: bool = False,
     ):
         self.system_prompt = system_prompt
         self.llm_config = llm_config
         self.knowledge_top_k = knowledge_top_k
+        self.knowledge_file_max_chars = knowledge_file_max_chars
         self.temperature = temperature
         self.response_format = response_format
+        self.max_iterations = max_iterations
+        self.max_history_messages = max_history_messages
         self.debug = debug
         self._client = llm_config.build_client()
         self._kb: Optional[KnowledgeBase] = None
@@ -116,7 +124,7 @@ class AgentBase:
                     return n >= (min_matches or 1)
                 return n >= 1
 
-            results = []
+            matches: list[tuple[str, str]] = []
             for path in sorted(self._kb.folder_path.rglob("*")):
                 if path.suffix.lower() not in self._kb.SUPPORTED_EXTENSIONS:
                     continue
@@ -124,16 +132,36 @@ class AgentBase:
                 check_filename = search_in in ("filename", "both")
                 check_content = search_in in ("content", "both")
                 if check_filename and _matches(path.name):
-                    results.append(f"[{relative}]\n{_read_file_as_text(path)}")
+                    matches.append((relative, _read_file_as_text(path)))
                     continue
                 if check_content:
                     text = _read_file_as_text(path)
                     if _matches(text):
-                        results.append(f"[{relative}]\n{text}")
-            if not results:
+                        matches.append((relative, text))
+            if not matches:
                 return f"No files found matching: {keywords}"
             if self.debug:
-                print(f"[debug] read_knowledge_files keywords={keywords!r} matched {len(results)} file(s)")
+                print(f"[debug] read_knowledge_files keywords={keywords!r} matched {len(matches)} file(s)")
+
+            # Cap the payload: a broad keyword can otherwise return the whole
+            # knowledge base in a single tool result and blow the context window.
+            budget = self.knowledge_file_max_chars
+            results = []
+            omitted = 0
+            for relative, text in matches:
+                if budget <= 0:
+                    omitted += 1
+                    continue
+                if len(text) > budget:
+                    text = f"{text[:budget]}\n[... file truncated, {len(text) - budget} character(s) omitted]"
+                budget -= len(text)
+                results.append(f"[{relative}]\n{text}")
+            if omitted:
+                results.append(
+                    f"[{omitted} more matching file(s) omitted: the {self.knowledge_file_max_chars}-character "
+                    f"limit was reached. Narrow the search with more specific keywords, "
+                    f'search_in="filename", or match_mode="all".]'
+                )
             return "\n\n---\n\n".join(results)
 
         if search_tool:
@@ -179,10 +207,14 @@ class AgentBase:
             context = "\n\n".join(f"[{c.source}]\n{c.text}" for c in chunks)
             system = f"{system}\n\n<context>\n{context}\n</context>"
 
+        # Built once: attachments are read from disk and base64-encoded here, so
+        # building it twice would re-read every file.
+        user_message = {"role": "user", "content": _build_user_content(message, files)}
+
         messages = (
             [{"role": "system", "content": system}]
             + list(self._conversation_messages)
-            + [{"role": "user", "content": _build_user_content(message, files)}]
+            + [user_message]
         )
 
         response = execute_tool_loop(
@@ -193,11 +225,26 @@ class AgentBase:
             debug=self.debug,
             temperature=self.temperature,
             response_format=self.response_format,
+            max_iterations=self.max_iterations,
         )
 
-        self._conversation_messages.append({"role": "user", "content": _build_user_content(message, files)})
+        self._conversation_messages.append(user_message)
         self._conversation_messages.append({"role": "assistant", "content": response})
+        self._trim_history()
         return response
+
+    def _trim_history(self) -> None:
+        """Drop the oldest turns once history exceeds ``max_history_messages``."""
+        limit = self.max_history_messages
+        if limit is None or len(self._conversation_messages) <= limit:
+            return
+        # Round up to a whole number of turns so history still starts on a user
+        # message rather than a dangling assistant reply.
+        dropped = len(self._conversation_messages) - limit
+        dropped += dropped % 2
+        self._conversation_messages = self._conversation_messages[dropped:]
+        if self.debug:
+            print(f"[debug] trimmed {dropped} message(s) from conversation history")
 
     def reset_conversation(self) -> None:
         """Clear the stored conversation history."""
@@ -222,7 +269,8 @@ class AgentBase:
             kwargs["temperature"] = self.temperature
         if self.response_format is not None:
             kwargs["response_format"] = self.response_format
-        return self._client.chat.completions.create(**kwargs).choices[0].message.content
+        content = self._client.chat.completions.create(**kwargs).choices[0].message.content
+        return content or ""
 
     def run(self, prompt: str, files: Optional[list[str]] = None) -> str:
         chunks = self.retrieve_knowledge(prompt)
@@ -245,4 +293,5 @@ class AgentBase:
             debug=self.debug,
             temperature=self.temperature,
             response_format=self.response_format,
+            max_iterations=self.max_iterations,
         )

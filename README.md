@@ -99,6 +99,12 @@ The tool-calling loop handles both the standard OpenAI `tool_calls` field and th
 
 The second form — the tool name as the single top-level key, arguments as the nested object — is also produced by GLM models. When an inline call is detected and the tool name is registered, the tool is executed, the result is fed back, and the loop continues exactly as with a structural call. Unknown tool names and non-tool JSON are returned unchanged. A safety cap of 5 consecutive text-emitted calls prevents infinite loops.
 
+The loop is bounded by `max_iterations` (default 10). Once the budget is spent, the tools are withheld from the request so the model has to answer in text — the loop always terminates and always returns a string, even against a model that would otherwise keep calling tools forever.
+
+```python
+agent = AgentBase(..., max_iterations=25)  # allow longer tool chains
+```
+
 ```python
 from llm_agent_base import AgentBase, LLMConnectionConfig
 
@@ -150,6 +156,12 @@ agent.reset_conversation()
 print(agent.chat("What is my name?"))  # history cleared, agent no longer knows
 ```
 
+History is unbounded by default and will eventually exceed the model's context window in a long session. Set `max_history_messages` to cap it — the oldest turns are dropped once the limit is passed:
+
+```python
+agent = AgentBase(..., max_history_messages=20)  # keep the last 10 turns
+```
+
 ### RAG (knowledge base)
 
 Place your documents in a folder (organised into subdirectories by topic). Call `ingest_knowledge` once to embed and index them, then use `run`, `ask`, or `chat` — relevant chunks are automatically retrieved and injected into the system prompt on every call.
@@ -160,6 +172,8 @@ When a knowledge base is configured, the agent registers two tools the LLM can c
 - **`read_knowledge_files`** — keyword search by filename or file content; returns complete file text. Works directly on files without a vector index.
 
 Both tools are enabled by default. Use `knowledge_search_tool=False` or `knowledge_file_tool=False` to disable either one.
+
+`read_knowledge_files` returns at most `knowledge_file_max_chars` (default 20 000) per call, so a broad keyword cannot return the entire knowledge base and overflow the context window. When the limit is hit, the result ends with a note telling the model how many files were omitted and to narrow its search.
 
 ```
 knowledge/
@@ -335,6 +349,9 @@ agent = AgentBase(..., debug=True)
 | `auto_load_or_ingest` | `bool` | `False` | Load saved index on init, or ingest and save if none exists |
 | `knowledge_search_tool` | `bool` | `True` | Register the `search_knowledge` semantic vector search tool |
 | `knowledge_file_tool` | `bool` | `True` | Register the `read_knowledge_files` keyword file search tool |
+| `knowledge_file_max_chars` | `int` | `20000` | Max characters `read_knowledge_files` may return in one result |
+| `max_iterations` | `int` | `10` | Max tool-calling rounds before a final answer is forced |
+| `max_history_messages` | `int \| None` | `None` | Cap on stored `chat()` history; oldest turns are dropped (unlimited when `None`) |
 | `debug` | `bool` | `False` | Print tool calls and retrievals to stdout |
 
 | Method | Description |

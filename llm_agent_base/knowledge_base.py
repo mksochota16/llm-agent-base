@@ -29,6 +29,16 @@ class KnowledgeBase:
         chunk_size: int = 1000,
         chunk_overlap: int = 100,
     ):
+        if chunk_size <= 0:
+            raise ValueError(f"chunk_size must be positive, got {chunk_size}")
+        if chunk_overlap < 0:
+            raise ValueError(f"chunk_overlap must be non-negative, got {chunk_overlap}")
+        if chunk_overlap >= chunk_size:
+            raise ValueError(
+                f"chunk_overlap ({chunk_overlap}) must be smaller than chunk_size "
+                f"({chunk_size}); otherwise chunking cannot advance."
+            )
+
         self.folder_path = Path(folder_path)
         self.index_dir = Path(index_dir)
         self.chunk_size = chunk_size
